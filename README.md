@@ -1,154 +1,196 @@
-# 🚀 Data ML Platform
+# Data & ML Platform
 
-A modular **Data & MLOps platform** designed to orchestrate data pipelines and track machine learning experiments using containerized services.
-
-This project integrates:
-
-* **Apache Airflow** for orchestration
-* **MLflow** for experiment tracking
-* **Docker & Docker Compose** for reproducible environments
+Personal infrastructure platform for orchestrating data pipelines and tracking ML experiments. All actual ETL/ML code lives in separate repositories and is executed here as versioned Docker images.
 
 ---
 
-## 🧠 Architecture Overview
+## Stack
 
-This platform follows a **decoupled architecture**:
+| Service | Version | Role |
+|---|---|---|
+| Apache Airflow | 3.2.0 | Pipeline orchestration (CeleryExecutor) |
+| MLflow | 2.19.0 | Experiment tracking & artifact storage |
+| PostgreSQL | 16 | Two isolated DBs: one for Airflow, one for MLflow |
+| Redis | 7.2 | Celery broker |
 
-* Each project (ETL / ML) lives in its own repository
-* CI/CD pipelines build **versioned Docker images**
-* Airflow orchestrates execution of those images
-* MLflow tracks experiments and results
+---
+
+## Architecture
+
+This platform is **infrastructure-only**. External projects are built into Docker images via their own CI/CD and executed here by Airflow.
 
 ```
-GitHub Repo (projects)
+External GitHub repos
         ↓
-CI/CD (GitHub Actions)
+CI/CD (GitHub Actions) → Docker image registry (GHCR)
         ↓
-Docker Image Registry
+Airflow — DockerOperator pulls & runs the image
         ↓
-Airflow (orchestration)
-        ↓
-MLflow (experiment tracking)
+MLflow — receives experiment logs from inside the container
 ```
 
 ---
 
-## 📦 Project Structure
+## Services
+
+```
+airflow-postgres     PostgreSQL 16 — Airflow metadata DB
+redis                Redis 7.2     — Celery broker
+airflow-init         One-shot container: DB migrations + admin user creation
+airflow-apiserver    Airflow API server + UI  →  :8080
+airflow-scheduler    DAG scheduling
+airflow-dag-processor DAG file parsing (new in Airflow v3)
+airflow-worker       Celery worker — runs tasks
+airflow-triggerer    Async task triggering
+
+mlflow-postgres      PostgreSQL 16 — MLflow backend store
+mlflow-server        MLflow tracking server  →  :5000
+
+flower (--profile flower)   Celery monitor UI  →  :5555
+airflow-cli (--profile debug) One-off CLI container
+```
+
+---
+
+## Directory Layout
 
 ```
 data-ml-platform/
-│
-├── docker-compose.yml        # Main orchestration file
-├── .env                      # Environment variables
-│
-├── airflow/
-│   └── dags/                # Airflow DAGs
-│
-├── mlflow/                  # MLflow configuration & data
-│
-└── README.md
+├── docker-compose.yaml       # Full stack definition
+├── Dockerfile.mlflow         # Extends mlflow image with psycopg2-binary
+├── .env                      # Secrets & config (copy from .env, fill secrets)
+├── dags/                     # Airflow DAG files (mounted into all AF containers)
+├── config/
+│   └── airflow.cfg           # Airflow config (mounted into containers)
+├── plugins/                  # Airflow plugins
+├── logs/                     # Airflow task logs (gitignored)
+└── mlartifacts/              # MLflow artifact storage (gitignored)
 ```
 
 ---
 
-## ⚙️ Services
+## Getting Started
 
-### 🔄 Airflow
-
-* Orchestrates pipelines using DAGs
-* Executes containerized jobs
-* Handles scheduling and dependencies
-
-### 🧪 MLflow
-
-* Tracks experiments
-* Stores metrics, parameters, and artifacts
-* Provides a UI for model comparison
-
----
-
-## 🚀 Getting Started
-
-### 1. Clone the repository
+### 1. Clone
 
 ```bash
-git clone https://github.com/your-username/data-ml-platform.git
+git clone https://github.com/StebanJrb/data-ml-platform.git
 cd data-ml-platform
 ```
 
----
+### 2. Configure secrets
 
-### 2. Start the platform
+Copy `.env` and fill in the two required secrets:
 
 ```bash
-docker compose up --build
+# FERNET_KEY — encrypts Airflow connections
+python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+
+# AIRFLOW__API_AUTH__JWT_SECRET — signs API tokens
+openssl rand -hex 32
+```
+
+All other variables in `.env` have working defaults for local development.
+
+### 3. Start the platform
+
+```bash
+docker compose up -d
+```
+
+First start takes longer — `airflow-init` runs DB migrations before the other services come up.
+
+### 4. Access
+
+| UI | URL | Default credentials |
+|---|---|---|
+| Airflow | http://localhost:8080 | `airflow` / `airflow` |
+| MLflow | http://localhost:5000 | — |
+| Flower (optional) | http://localhost:5555 | — |
+
+---
+
+## Common Commands
+
+```bash
+# Start with Flower (Celery monitor)
+docker compose --profile flower up -d
+
+# Run Airflow CLI commands
+docker compose --profile debug run --rm airflow-cli airflow dags list
+
+# Follow logs for a specific service
+docker compose logs -f mlflow-server
+docker compose logs -f airflow-apiserver
+
+# Stop everything
+docker compose down
+
+# Full reset (removes volumes/data)
+docker compose down -v
+
+# Rebuild after Dockerfile changes
+docker compose up -d --build
 ```
 
 ---
 
-### 3. Access services
+## Adding Extra Python Packages (without rebuilding)
 
-* Airflow UI → http://localhost:8080
-* MLflow UI → http://localhost:5000
+Set `_PIP_ADDITIONAL_REQUIREMENTS` in `.env` before starting:
+
+```
+_PIP_ADDITIONAL_REQUIREMENTS=apache-airflow-providers-docker==3.9.0 scikit-learn
+```
 
 ---
 
-## 🔗 How Projects Integrate
+## Integrating External Projects
 
-External projects are **not executed directly from GitHub**.
-
-Instead:
-
-1. Each project builds a Docker image via CI/CD
-2. The image is pushed to a registry (e.g., GHCR)
-3. Airflow executes the image using a DAG
-
-Example:
+### DAG pattern
 
 ```python
+from airflow.providers.docker.operators.docker import DockerOperator
+
 DockerOperator(
     task_id="train_model",
     image="ghcr.io/your-user/ml-project:1.0.0",
-    command="python train.py"
+    command="python train.py",
+    environment={"MLFLOW_TRACKING_URI": "http://mlflow-server:5000"},
+    network_mode="data-ml-platform_default",  # join the compose network
 )
 ```
 
----
+The `MLFLOW_TRACKING_URI=http://mlflow-server:5000` env var is already injected into all Airflow containers, so workers can reach MLflow without extra config.
 
-## 📊 MLflow Integration
-
-Inside your ML projects:
+### Logging to MLflow from inside a container
 
 ```python
 import mlflow
 
-mlflow.set_tracking_uri("http://mlflow:5000")
+mlflow.set_tracking_uri("http://mlflow-server:5000")  # service name, not localhost
 
 with mlflow.start_run():
-    mlflow.log_param("model", "example")
+    mlflow.log_param("learning_rate", 0.01)
+    mlflow.log_metric("accuracy", 0.95)
 ```
 
 ---
 
-## 🧩 Design Principles
+## Airflow v3 Notes
 
-* **Decoupled services** (orchestration ≠ execution)
-* **Reproducibility via Docker images**
-* **Versioned pipelines**
-* **Scalable architecture (Kubernetes-ready)**
+Airflow 3.x introduces breaking changes vs 2.x:
 
----
-
-## 📌 Roadmap
-
-* [ ] Add example DAGs
-* [ ] Integrate DockerOperator pipelines
-* [ ] Add sample ML project
-* [ ] CI/CD for infrastructure
-* [ ] Kubernetes deployment
+- `api-server` replaces the old `webserver`
+- `dag-processor` is a new dedicated service for parsing DAG files
+- Health endpoint is `/api/v2/monitor/health` (not `/health`)
+- Workers need `AIRFLOW__CORE__EXECUTION_API_SERVER_URL` pointing to the API server
 
 ---
 
-## 🤝 Contributing
+## Roadmap
 
-This is a personal portfolio project, but suggestions and ideas are welcome.
+- [ ] Example DAG using DockerOperator
+- [ ] Sample ML project (external repo) integrated end-to-end
+- [ ] Remote artifact storage (S3/GCS) for MLflow
+- [ ] CI/CD for this infrastructure repo

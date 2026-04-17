@@ -1,0 +1,36 @@
+# Contexto de build para Dockerfile.mlflow
+# Solo se necesitan los archivos mínimos para construir la imagen
+
+# Datos de runtime
+logs/
+mlartifacts/
+
+# Configuración y DAGs (no van en la imagen)
+dags/
+plugins/
+config/
+
+# Git
+.git/
+.gitignore
+
+# Secretos y entorno
+.env
+.env.*
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Editores y SO
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# README y documentación
+README.md
+CLAUDE.md
